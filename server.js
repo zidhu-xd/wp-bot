@@ -1,7 +1,6 @@
 import express from 'express';
-import { Client, LocalAuth } from 'whatsapp-web.js';
+import { Client, LocalAuth, MessageMedia } from 'whatsapp-web.js';
 import qrcodeTerminal from 'qrcode-terminal';
-import { google } from 'googleapis';
 import dotenv from 'dotenv';
 import { setInterval } from 'timers/promises';
 
@@ -10,41 +9,11 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 10000;
 const HEARTBEAT_URL = process.env.HEARTBEAT_URL;
+const OWNER_NUMBER = process.env.OWNER_NUMBER;
 
-// ---------- Google Drive Setup ----------
-const jwt = new google.auth.JWT(
-  process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
-  null,
-  process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
-  ['https://www.googleapis.com/auth/drive.file']
-);
-const drive = google.drive({ version: 'v3', auth: jwt });
-
-/**
- * Upload a Buffer (from Base64) to Google Drive.
- * @param {Buffer} buffer
- * @param {string} mimeType
- * @param {string} filename
- * @returns {Promise<string>} public view link
- */
-async function uploadToDrive(buffer, mimeType, filename) {
-  const media = {
-    requestBody: {
-      name: filename,
-      parents: [process.env.GOOGLE_DRIVE_FOLDER_ID],
-    },
-    media: {
-      mimeType,
-      body: require('stream').Readable.from(buffer),
-    },
-  };
-  const res = await drive.files.create(media);
-  // Make file publicly readable
-  await drive.permissions.create({
-    fileId: res.data.id,
-    requestBody: { role: 'reader', type: 'anyone' },
-  });
-  return `https://drive.google.com/file/d/${res.data.id}/view`;
+if (!OWNER_NUMBER) {
+  console.error('FATAL: OWNER_NUMBER is not set in .env. Please configure it and restart.');
+  process.exit(1);
 }
 
 // ---------- WhatsApp Client ----------
@@ -53,7 +22,7 @@ const SESSION_PATH = '/tmp/.wwebjs_auth';
 
 const client = new Client({
   authStrategy: new LocalAuth({
-    clientId: 'whatsapp-viewonce',
+    clientId: 'whatsapp-viewonce-forwarder',
     dataPath: SESSION_PATH,
   }),
   puppeteer: {
@@ -69,6 +38,7 @@ client.on('qr', qr => {
 
 client.on('ready', () => {
   console.log('WhatsApp client is ready!');
+  console.log(`Forwarding View Once media to: ${OWNER_NUMBER}`);
 });
 
 client.on('remote_session_saved', () => {
@@ -82,31 +52,41 @@ client.on('message', async msg => {
     const isViewOnce = msg.body.toLowerCase().includes('view once') || msg.id.id.includes('viewonce');
     if (isViewOnce) {
       try {
-        console.log(`View Once ${msg.type} received from ${msg.from}`);
+        console.log(`View Once ${msg.type} received from ${msg.from}. Forwarding...`);
+        
+        // Download the media data
         const media = await msg.downloadMedia();
+        
         if (!media || !media.data) {
-          console.error('No media data found.');
+          console.error('Failed to download media content.');
           return;
         }
-        // Convert Base64 to Buffer
-        const buffer = Buffer.from(media.data, 'base64');
-        const mimeType = msg.type === 'image' ? 'image/jpeg' : 'video/mp4';
-        const ext = msg.type === 'image' ? 'jpg' : 'mp4';
-        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-        const filename = `viewonce-${timestamp}.${ext}`;
-        const link = await uploadToDrive(buffer, mimeType, filename);
-        console.log('Uploaded to Google Drive:', link);
-        // Optional: reply with link (privacy warning)
-        // await msg.reply(`🔗 View Once saved: ${link}`);
+
+        // Recreate the MessageMedia object from the downloaded data
+        const forwardedMedia = new MessageMedia(
+          media.mimetype,
+          media.data,
+          media.filename
+        );
+
+        // Prepare a caption for the forwarded message
+        const timestamp = new Date().toLocaleString();
+        const caption = `🔒 *View Once Media*\n\nFrom: ${msg.from}\nReceived: ${timestamp}`;
+
+        // Send the media to the owner's number
+        await client.sendMessage(OWNER_NUMBER, forwardedMedia, { caption: caption });
+        
+        console.log(`Successfully forwarded View Once ${msg.type} to ${OWNER_NUMBER}`);
+
       } catch (err) {
-        console.error('Failed to upload View Once media:', err);
+        console.error('Failed to forward View Once media:', err);
       }
     }
   }
 });
 
 // ---------- Express & Heartbeat ----------
-app.get('/', (req, res) => res.send('WhatsApp View Once Uploader is running.'));
+app.get('/', (req, res) => res.send('WhatsApp View Once Forwarder is running.'));
 app.get('/ping', (req, res) => {
   console.log('Ping received at', new Date().toISOString());
   res.send('pong');
@@ -118,7 +98,7 @@ app.get('/ping', (req, res) => {
     client.initialize().catch(err => console.error('WhatsApp init error:', err));
     app.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
 
-    // Heartbeat: ping ourselves every 10 minutes
+    // Heartbeat: ping ourselves every 10 minutes to keep Render free tier alive
     if (HEARTBEAT_URL) {
       setInterval(async () => {
         try {
