@@ -51,8 +51,11 @@ const client = new Client({
 
 client.on("qr", qr => {
   console.log("\nScan this QR with WhatsApp → Linked Devices\n");
-  qrcodeTerminal.generate(qr, { small: true });
+  client.on("qr", qr => {
+  console.log("\nRAW QR STRING:\n");
+  console.log(qr);
 });
+
 
 client.on("ready", () => {
   console.log("WhatsApp client is ready.");
