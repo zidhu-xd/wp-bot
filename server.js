@@ -18,16 +18,8 @@ if (!OWNER_NUMBER) {
   process.exit(1);
 }
 
-/*
-  Railway supports writable filesystem.
-  Session will persist normally.
-*/
 const SESSION_PATH = "./.wwebjs_auth";
 
-/*
-  Use puppeteer’s bundled Chromium.
-  This works reliably on Railway.
-*/
 const client = new Client({
   authStrategy: new LocalAuth({
     clientId: "viewonce-forwarder",
@@ -49,31 +41,33 @@ const client = new Client({
    WhatsApp Events
 =========================== */
 
-client.on("qr", qr => {
+client.on("qr", (qr) => {
   console.log("\nScan this QR with WhatsApp → Linked Devices\n");
-  client.on("qr", qr => {
-  console.log("\nRAW QR STRING:\n");
-  console.log(qr);
-});
+  qrcodeTerminal.generate(qr, { small: false });
 
+  console.log("\nIf QR looks broken, open this in browser:\n");
+  console.log(
+    `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(qr)}\n`
+  );
+});
 
 client.on("ready", () => {
   console.log("WhatsApp client is ready.");
   console.log("Forwarding to:", OWNER_NUMBER);
 });
 
-client.on("auth_failure", msg => {
+client.on("auth_failure", (msg) => {
   console.error("Authentication failed:", msg);
 });
 
-client.on("disconnected", reason => {
+client.on("disconnected", (reason) => {
   console.error("Client disconnected:", reason);
 });
 
 /*
   View Once Media Forwarder
 */
-client.on("message", async msg => {
+client.on("message", async (msg) => {
   try {
     if (!msg.hasMedia) return;
 
@@ -100,8 +94,7 @@ client.on("message", async msg => {
 
     const timestamp = new Date().toLocaleString();
 
-    const caption =
-`View Once Media
+    const caption = `View Once Media
 
 From: ${msg.from}
 Time: ${timestamp}`;
@@ -109,7 +102,6 @@ Time: ${timestamp}`;
     await client.sendMessage(OWNER_NUMBER, forwardedMedia, { caption });
 
     console.log("Forwarded successfully.");
-
   } catch (err) {
     console.error("Forwarding error:", err);
   }
