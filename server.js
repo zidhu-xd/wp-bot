@@ -1,10 +1,11 @@
-import express from 'express';
-import { Client, LocalAuth, MessageMedia } from 'whatsapp-web.js';
-import qrcodeTerminal from 'qrcode-terminal';
-import dotenv from 'dotenv';
-import { setInterval } from 'timers/promises';
+import express from "express";
+import pkg from "whatsapp-web.js";
+import qrcodeTerminal from "qrcode-terminal";
+import dotenv from "dotenv";
 
 dotenv.config();
+
+const { Client, LocalAuth, MessageMedia } = pkg;
 
 const app = express();
 const PORT = process.env.PORT || 10000;
@@ -12,104 +13,161 @@ const HEARTBEAT_URL = process.env.HEARTBEAT_URL;
 const OWNER_NUMBER = process.env.OWNER_NUMBER;
 
 if (!OWNER_NUMBER) {
-  console.error('FATAL: OWNER_NUMBER is not set in .env. Please configure it and restart.');
+  console.error("FATAL: OWNER_NUMBER is not set in environment variables.");
   process.exit(1);
 }
 
-// ---------- WhatsApp Client ----------
-// Store session in /tmp (persisted across Render restarts)
-const SESSION_PATH = '/tmp/.wwebjs_auth';
+/*
+  IMPORTANT FOR RENDER:
+  Render filesystem is ephemeral except /tmp
+  Session must be stored in /tmp
+*/
+const SESSION_PATH = "/tmp/.wwebjs_auth";
 
 const client = new Client({
   authStrategy: new LocalAuth({
-    clientId: 'whatsapp-viewonce-forwarder',
-    dataPath: SESSION_PATH,
+    clientId: "whatsapp-viewonce-forwarder",
+    dataPath: SESSION_PATH
   }),
   puppeteer: {
     headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox'],
-  },
+    args: [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-accelerated-2d-canvas",
+      "--no-first-run",
+      "--no-zygote",
+      "--single-process"
+    ]
+  }
 });
 
-client.on('qr', qr => {
-  console.log('QR code received. Scan with WhatsApp to link:');
+/* ===========================
+   WhatsApp Events
+=========================== */
+
+client.on("qr", qr => {
+  console.log("Scan QR to authenticate:");
   qrcodeTerminal.generate(qr, { small: true });
 });
 
-client.on('ready', () => {
-  console.log('WhatsApp client is ready!');
-  console.log(`Forwarding View Once media to: ${OWNER_NUMBER}`);
+client.on("ready", () => {
+  console.log("WhatsApp client ready.");
+  console.log("Forward target:", OWNER_NUMBER);
 });
 
-client.on('remote_session_saved', () => {
-  console.log('Remote session saved to /tmp');
+client.on("auth_failure", msg => {
+  console.error("Auth failure:", msg);
 });
 
-client.on('message', async msg => {
-  // Detect View Once media (image or video)
-  if (msg.type === 'image' || msg.type === 'video') {
-    // Heuristic: message body or id indicates View Once
-    const isViewOnce = msg.body.toLowerCase().includes('view once') || msg.id.id.includes('viewonce');
-    if (isViewOnce) {
-      try {
-        console.log(`View Once ${msg.type} received from ${msg.from}. Forwarding...`);
-        
-        // Download the media data
-        const media = await msg.downloadMedia();
-        
-        if (!media || !media.data) {
-          console.error('Failed to download media content.');
-          return;
-        }
+client.on("disconnected", reason => {
+  console.error("Client disconnected:", reason);
+});
 
-        // Recreate the MessageMedia object from the downloaded data
-        const forwardedMedia = new MessageMedia(
-          media.mimetype,
-          media.data,
-          media.filename
-        );
+/*
+  Improved View Once detection:
+  whatsapp-web.js exposes msg.isViewOnce in newer versions
+*/
+client.on("message", async msg => {
+  try {
+    if (!msg.hasMedia) return;
 
-        // Prepare a caption for the forwarded message
-        const timestamp = new Date().toLocaleString();
-        const caption = `🔒 *View Once Media*\n\nFrom: ${msg.from}\nReceived: ${timestamp}`;
+    const isViewOnce =
+      msg.isViewOnce ||
+      msg._data?.isViewOnce ||
+      msg._data?.viewOnce;
 
-        // Send the media to the owner's number
-        await client.sendMessage(OWNER_NUMBER, forwardedMedia, { caption: caption });
-        
-        console.log(`Successfully forwarded View Once ${msg.type} to ${OWNER_NUMBER}`);
+    if (!isViewOnce) return;
 
-      } catch (err) {
-        console.error('Failed to forward View Once media:', err);
-      }
+    console.log("View Once media detected from:", msg.from);
+
+    const media = await msg.downloadMedia();
+    if (!media?.data) {
+      console.error("Media download failed.");
+      return;
     }
+
+    const forwardedMedia = new MessageMedia(
+      media.mimetype,
+      media.data,
+      media.filename || "viewonce"
+    );
+
+    const timestamp = new Date().toLocaleString();
+
+    const caption =
+`View Once Media
+
+From: ${msg.from}
+Time: ${timestamp}`;
+
+    await client.sendMessage(OWNER_NUMBER, forwardedMedia, {
+      caption
+    });
+
+    console.log("Forward successful.");
+
+  } catch (err) {
+    console.error("Forwarding error:", err);
   }
 });
 
-// ---------- Express & Heartbeat ----------
-app.get('/', (req, res) => res.send('WhatsApp View Once Forwarder is running.'));
-app.get('/ping', (req, res) => {
-  console.log('Ping received at', new Date().toISOString());
-  res.send('pong');
+/* ===========================
+   Express Server
+=========================== */
+
+app.get("/", (req, res) => {
+  res.send("WhatsApp View Once Forwarder running.");
 });
 
-// Start server and WhatsApp
+app.get("/ping", (req, res) => {
+  res.send("pong");
+});
+
+app.listen(PORT, () => {
+  console.log("Server listening on port", PORT);
+});
+
+/* ===========================
+   Initialize WhatsApp
+=========================== */
+
 (async () => {
   try {
-    client.initialize().catch(err => console.error('WhatsApp init error:', err));
-    app.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
-
-    // Heartbeat: ping ourselves every 10 minutes to keep Render free tier alive
-    if (HEARTBEAT_URL) {
-      setInterval(async () => {
-        try {
-          const r = await fetch(HEARTBEAT_URL);
-          console.log('Heartbeat status:', r.status);
-        } catch (e) {
-          console.error('Heartbeat failed:', e.message);
-        }
-      }, 10 * 60 * 1000); // 10 minutes
-    }
+    await client.initialize();
   } catch (err) {
-    console.error('Startup error:', err);
+    console.error("Initialization failed:", err);
   }
 })();
+
+/* ===========================
+   Heartbeat (Render Keep Alive)
+=========================== */
+
+if (HEARTBEAT_URL) {
+  setInterval(async () => {
+    try {
+      const res = await fetch(HEARTBEAT_URL);
+      console.log("Heartbeat:", res.status);
+    } catch (err) {
+      console.error("Heartbeat failed:", err.message);
+    }
+  }, 10 * 60 * 1000);
+}
+
+/* ===========================
+   Graceful Shutdown
+=========================== */
+
+process.on("SIGTERM", async () => {
+  console.log("SIGTERM received. Shutting down...");
+  await client.destroy();
+  process.exit(0);
+});
+
+process.on("SIGINT", async () => {
+  console.log("SIGINT received. Shutting down...");
+  await client.destroy();
+  process.exit(0);
+});
