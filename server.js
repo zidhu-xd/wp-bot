@@ -2,54 +2,45 @@ import express from "express";
 import pkg from "whatsapp-web.js";
 import qrcodeTerminal from "qrcode-terminal";
 import dotenv from "dotenv";
+import puppeteer from "puppeteer";
 
 dotenv.config();
 
 const { Client, LocalAuth, MessageMedia } = pkg;
 
 const app = express();
-const PORT = process.env.PORT || 10000;
-const HEARTBEAT_URL = process.env.HEARTBEAT_URL;
+const PORT = process.env.PORT || 3000;
 const OWNER_NUMBER = process.env.OWNER_NUMBER;
+const HEARTBEAT_URL = process.env.HEARTBEAT_URL;
 
 if (!OWNER_NUMBER) {
-  console.error("FATAL: OWNER_NUMBER is not set in environment variables.");
+  console.error("FATAL: OWNER_NUMBER is not set.");
   process.exit(1);
 }
 
 /*
-  Render filesystem notes:
-  Only /tmp is writable at runtime.
-  WhatsApp session must be stored there.
+  Railway supports writable filesystem.
+  Session will persist normally.
 */
-const SESSION_PATH = "/tmp/.wwebjs_auth";
+const SESSION_PATH = "./.wwebjs_auth";
 
 /*
-  IMPORTANT:
-  Chrome was installed during build at:
-  /opt/render/.cache/puppeteer/chrome/linux-145.0.7632.67/chrome-linux64/chrome
-
-  If version changes in future builds, update this path accordingly.
+  Use puppeteer’s bundled Chromium.
+  This works reliably on Railway.
 */
-const CHROME_PATH =
-  "/opt/render/.cache/puppeteer/chrome/linux-145.0.7632.67/chrome-linux64/chrome";
-
 const client = new Client({
   authStrategy: new LocalAuth({
-    clientId: "whatsapp-viewonce-forwarder",
+    clientId: "viewonce-forwarder",
     dataPath: SESSION_PATH
   }),
   puppeteer: {
     headless: true,
-    executablePath: CHROME_PATH,
+    executablePath: puppeteer.executablePath(),
     args: [
       "--no-sandbox",
       "--disable-setuid-sandbox",
       "--disable-dev-shm-usage",
-      "--disable-accelerated-2d-canvas",
-      "--no-first-run",
-      "--no-zygote",
-      "--single-process"
+      "--disable-gpu"
     ]
   }
 });
@@ -59,13 +50,13 @@ const client = new Client({
 =========================== */
 
 client.on("qr", qr => {
-  console.log("Scan QR to authenticate:");
+  console.log("\nScan this QR with WhatsApp → Linked Devices\n");
   qrcodeTerminal.generate(qr, { small: true });
 });
 
 client.on("ready", () => {
-  console.log("WhatsApp client ready.");
-  console.log("Forward target:", OWNER_NUMBER);
+  console.log("WhatsApp client is ready.");
+  console.log("Forwarding to:", OWNER_NUMBER);
 });
 
 client.on("auth_failure", msg => {
@@ -77,7 +68,7 @@ client.on("disconnected", reason => {
 });
 
 /*
-  Improved View Once detection
+  View Once Media Forwarder
 */
 client.on("message", async msg => {
   try {
@@ -93,7 +84,6 @@ client.on("message", async msg => {
     console.log("View Once media detected from:", msg.from);
 
     const media = await msg.downloadMedia();
-
     if (!media?.data) {
       console.error("Failed to download media.");
       return;
@@ -113,9 +103,7 @@ client.on("message", async msg => {
 From: ${msg.from}
 Time: ${timestamp}`;
 
-    await client.sendMessage(OWNER_NUMBER, forwardedMedia, {
-      caption
-    });
+    await client.sendMessage(OWNER_NUMBER, forwardedMedia, { caption });
 
     console.log("Forwarded successfully.");
 
@@ -129,7 +117,7 @@ Time: ${timestamp}`;
 =========================== */
 
 app.get("/", (req, res) => {
-  res.send("WhatsApp View Once Forwarder running.");
+  res.send("WhatsApp View Once Forwarder running on Railway.");
 });
 
 app.get("/ping", (req, res) => {
@@ -137,7 +125,7 @@ app.get("/ping", (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log("Server listening on port", PORT);
+  console.log("Server running on port", PORT);
 });
 
 /* ===========================
@@ -148,19 +136,19 @@ app.listen(PORT, () => {
   try {
     await client.initialize();
   } catch (err) {
-    console.error("Initialization failed:", err);
+    console.error("Initialization error:", err);
   }
 })();
 
 /* ===========================
-   Heartbeat (Render Keep Alive)
+   Optional Heartbeat
 =========================== */
 
 if (HEARTBEAT_URL) {
   setInterval(async () => {
     try {
       const res = await fetch(HEARTBEAT_URL);
-      console.log("Heartbeat status:", res.status);
+      console.log("Heartbeat:", res.status);
     } catch (err) {
       console.error("Heartbeat failed:", err.message);
     }
@@ -172,13 +160,13 @@ if (HEARTBEAT_URL) {
 =========================== */
 
 process.on("SIGTERM", async () => {
-  console.log("SIGTERM received. Cleaning up...");
+  console.log("Shutting down...");
   await client.destroy();
   process.exit(0);
 });
 
 process.on("SIGINT", async () => {
-  console.log("SIGINT received. Cleaning up...");
+  console.log("Shutting down...");
   await client.destroy();
   process.exit(0);
 });
