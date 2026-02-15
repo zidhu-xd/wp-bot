@@ -18,11 +18,21 @@ if (!OWNER_NUMBER) {
 }
 
 /*
-  IMPORTANT FOR RENDER:
-  Render filesystem is ephemeral except /tmp
-  Session must be stored in /tmp
+  Render filesystem notes:
+  Only /tmp is writable at runtime.
+  WhatsApp session must be stored there.
 */
 const SESSION_PATH = "/tmp/.wwebjs_auth";
+
+/*
+  IMPORTANT:
+  Chrome was installed during build at:
+  /opt/render/.cache/puppeteer/chrome/linux-145.0.7632.67/chrome-linux64/chrome
+
+  If version changes in future builds, update this path accordingly.
+*/
+const CHROME_PATH =
+  "/opt/render/.cache/puppeteer/chrome/linux-145.0.7632.67/chrome-linux64/chrome";
 
 const client = new Client({
   authStrategy: new LocalAuth({
@@ -31,6 +41,7 @@ const client = new Client({
   }),
   puppeteer: {
     headless: true,
+    executablePath: CHROME_PATH,
     args: [
       "--no-sandbox",
       "--disable-setuid-sandbox",
@@ -58,7 +69,7 @@ client.on("ready", () => {
 });
 
 client.on("auth_failure", msg => {
-  console.error("Auth failure:", msg);
+  console.error("Authentication failed:", msg);
 });
 
 client.on("disconnected", reason => {
@@ -66,8 +77,7 @@ client.on("disconnected", reason => {
 });
 
 /*
-  Improved View Once detection:
-  whatsapp-web.js exposes msg.isViewOnce in newer versions
+  Improved View Once detection
 */
 client.on("message", async msg => {
   try {
@@ -83,8 +93,9 @@ client.on("message", async msg => {
     console.log("View Once media detected from:", msg.from);
 
     const media = await msg.downloadMedia();
+
     if (!media?.data) {
-      console.error("Media download failed.");
+      console.error("Failed to download media.");
       return;
     }
 
@@ -106,7 +117,7 @@ Time: ${timestamp}`;
       caption
     });
 
-    console.log("Forward successful.");
+    console.log("Forwarded successfully.");
 
   } catch (err) {
     console.error("Forwarding error:", err);
@@ -149,7 +160,7 @@ if (HEARTBEAT_URL) {
   setInterval(async () => {
     try {
       const res = await fetch(HEARTBEAT_URL);
-      console.log("Heartbeat:", res.status);
+      console.log("Heartbeat status:", res.status);
     } catch (err) {
       console.error("Heartbeat failed:", err.message);
     }
@@ -161,13 +172,13 @@ if (HEARTBEAT_URL) {
 =========================== */
 
 process.on("SIGTERM", async () => {
-  console.log("SIGTERM received. Shutting down...");
+  console.log("SIGTERM received. Cleaning up...");
   await client.destroy();
   process.exit(0);
 });
 
 process.on("SIGINT", async () => {
-  console.log("SIGINT received. Shutting down...");
+  console.log("SIGINT received. Cleaning up...");
   await client.destroy();
   process.exit(0);
 });
